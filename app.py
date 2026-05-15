@@ -1,136 +1,163 @@
 import arcade
 import time
 import os
+import zipfile
+import shutil
 
-# --- 설정 ---
+# --- [ 설정값 ] ---
 SCREEN_WIDTH = 500
 SCREEN_HEIGHT = 800
 HIT_LINE_Y = 100
-NOTE_RADIUS = 35
+NOTE_RADIUS = 30
 LANE_WIDTH = 100
 LANE_START_X = 100
-NOTE_SPEED = 500 # 픽셀/초
+NOTE_SPEED = 1800 
 
-# 키 바인딩 (4K)
-KEYS = [arcade.key.D, arcade.key.F, arcade.key.J, arcade.key.K]
+# 요청하신 키 설정: S, D, L, ; (세미콜론)
+KEYS = [arcade.key.S, arcade.key.D, arcade.key.L, arcade.key.SEMICOLON]
 
-class Note(arcade.Sprite):
-    def __init__(self, lane, hit_time):
-        # 원형 텍스처 생성
-        texture = arcade.make_circle_texture(NOTE_RADIUS * 2, arcade.color.WHITE)
-        super().__init__(texture)
-        self.lane = lane
-        self.hit_time = hit_time # ms 단위
-        self.center_x = LANE_START_X + (lane * LANE_WIDTH)
-        self.center_y = -1000 # 초기 위치는 화면 밖
+# 초기 오프셋 설정 (단위: 초)
+# 에어팟 지연시간에 맞춰 0.200 ~ 0.300 사이에서 시작해보세요.
+INITIAL_OFFSET = 0.275 
 
 class ManiaGame(arcade.Window):
-    def __init__(self, osu_file):
-        super().__init__(SCREEN_WIDTH, SCREEN_HEIGHT, "Arcade 3.0 osu!mania")
-        self.osu_file = osu_file
+    def __init__(self, osz_path):
+        super().__init__(SCREEN_WIDTH, SCREEN_HEIGHT, "Arcade 3.0 - AirPods Mania")
+        self.osz_path = osz_path
+        self.extract_path = "temp_map"
+        
         self.notes_to_spawn = []
         self.active_notes = arcade.SpriteList()
+        self.audio_file = None
         self.score = 0
+        self.combo = 0
         self.start_time = None
-        self.music = None
-        self.player = None
-
-    def parse_osu(self):
-        """ .osu 파일을 파싱하여 노트 데이터를 추출합니다. """
-        with open(self.osu_file, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
+        self.music_player = None
         
-        is_hit_objects = False
-        for line in lines:
-            if "[HitObjects]" in line:
-                is_hit_objects = True
-                continue
-            if is_hit_objects and "," in line:
-                parts = line.split(',')
-                # x좌표로 레인 판별 (0~512 범위를 4등분)
-                x = int(parts[0])
-                lane = min(3, x // 128)
-                hit_time = int(parts[2]) / 1000.0 # 초 단위 변환
-                self.notes_to_spawn.append((hit_time, lane))
-        
-        # 시간순 정렬
-        self.notes_to_spawn.sort()
+        # 오프셋 변수
+        self.offset = INITIAL_OFFSET
 
     def setup(self):
         arcade.set_background_color(arcade.color.BLACK_OLIVE)
-        self.parse_osu()
-        # 음악 로드 (파일 경로가 있다면)
-        # self.music = arcade.load_sound("audio.mp3")
-        # self.player = arcade.play_sound(self.music)
+        
+        # 1. OSZ 압축 풀기
+        if os.path.exists(self.extract_path):
+            shutil.rmtree(self.extract_path)
+        with zipfile.ZipFile(self.osz_path, 'r') as zip_ref:
+            zip_ref.extractall(self.extract_path)
+        
+        # 2. 파일들 찾기
+        osu_file = None
+        for file in os.listdir(self.extract_path):
+            if file.endswith(".osu"):
+                osu_file = os.path.join(self.extract_path, file)
+            if file.lower().endswith((".mp3", ".ogg")):
+                self.audio_file = os.path.join(self.extract_path, file)
+        
+        if not osu_file:
+            print("채보 파일을 찾을 수 없습니다.")
+            return
+
+        # 3. 파싱
+        self.parse_osu(osu_file)
+        
+        # 4. 음악 재생 및 타이머 시작
+        if self.audio_file:
+            music = arcade.load_sound(self.audio_file)
+            self.music_player = arcade.play_sound(music)
+        
         self.start_time = time.time()
 
-    def on_update(self, delta_time):
-        elapsed = time.time() - self.start_time
+    def parse_osu(self, file_path):
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        objects_section = content.split("[HitObjects]")[-1].strip()
+        for line in objects_section.split('\n'):
+            if ',' in line:
+                parts = line.split(',')
+                x = int(parts[0])
+                lane = min(3, x // 128)
+                hit_time = int(parts[2]) / 1000.0
+                
+                tex = arcade.make_circle_texture(NOTE_RADIUS * 2, arcade.color.ELECTRIC_BLUE)
+                note = arcade.Sprite(tex)
+                note.lane = lane
+                note.hit_time = hit_time
+                note.center_x = LANE_START_X + (lane * LANE_WIDTH)
+                self.notes_to_spawn.append(note)
+        
+        self.notes_to_spawn.sort(key=lambda n: n.hit_time)
 
-        # 1. 생성 타이밍 확인
-        while self.notes_to_spawn and elapsed >= (self.notes_to_spawn[0][0] - (SCREEN_HEIGHT / NOTE_SPEED)):
-            hit_time, lane = self.notes_to_spawn.pop(0)
-            note = Note(lane, hit_time)
+    def on_update(self, delta_time):
+        if not self.start_time: return
+        
+        # [핵심] 현재 경과 시간에서 오프셋을 뺍니다.
+        elapsed = (time.time() - self.start_time) - self.offset
+
+        # 노트 생성 (현재 시간 + 미리보기 시간)
+        look_ahead = SCREEN_HEIGHT / NOTE_SPEED
+        while self.notes_to_spawn and self.notes_to_spawn[0].hit_time <= elapsed + look_ahead:
+            note = self.notes_to_spawn.pop(0)
             self.active_notes.append(note)
 
-        # 2. 노트 위치 업데이트 (음악 시간 동기화)
+        # 노트 위치 업데이트
         for note in self.active_notes:
-            # 판정선 위치 + (목표시간 - 현재시간) * 속도
             note.center_y = HIT_LINE_Y + (note.hit_time - elapsed) * NOTE_SPEED
 
-            # 화면 아래로 완전히 지나간 경우 (Miss)
+        # Miss 처리
+        for note in self.active_notes:
             if note.center_y < -50:
                 note.remove_from_sprite_lists()
+                self.combo = 0
 
     def on_draw(self):
         self.clear()
         
-        # 레인 배경
-        arcade.draw_rect_filled(SCREEN_WIDTH/2, SCREEN_HEIGHT/2, LANE_WIDTH*4, SCREEN_HEIGHT, (30, 30, 30))
-        
-        # 판정선 (서클 가이드)
+        # 레인 가이드
         for i in range(4):
             x = LANE_START_X + (i * LANE_WIDTH)
-            arcade.draw_circle_outline(x, HIT_LINE_Y, NOTE_RADIUS, arcade.color.GRAY, 2)
-
-        # 노트 그리기
+            arcade.draw_circle_outline(x, HIT_LINE_Y, NOTE_RADIUS + 5, arcade.color.GRAY, 2)
+            
         self.active_notes.draw()
-
-        # UI
-        arcade.draw_text(f"Score: {self.score}", 20, SCREEN_HEIGHT - 40, arcade.color.WHITE, 15)
+        
+        # UI 레이아웃
+        arcade.draw_text(f"Score: {self.score}", 20, SCREEN_HEIGHT - 40, arcade.color.WHITE, 18)
+        arcade.draw_text(f"Combo: {self.combo}", 20, SCREEN_HEIGHT - 70, arcade.color.GOLD, 18)
+        arcade.draw_text(f"Offset: {int(self.offset * 1000)}ms (UP/DOWN to adj)", 20, 20, arcade.color.GRAY, 12)
 
     def on_key_press(self, key, modifiers):
         if key in KEYS:
             lane = KEYS.index(key)
             self.check_hit(lane)
+        
+        # 실시간 오프셋 조정 (10ms 단위)
+        elif key == arcade.key.UP:
+            self.offset += 0.010
+        elif key == arcade.key.DOWN:
+            self.offset -= 0.010
 
     def check_hit(self, lane):
-        elapsed = time.time() - self.start_time
-        # 해당 레인의 가장 낮은 노트를 검색
-        best_note = None
-        min_diff = 1.0
+        # 판정 시에도 오프셋 보정된 시간 사용
+        elapsed = (time.time() - self.start_time) - self.offset
         
         for note in self.active_notes:
             if note.lane == lane:
                 diff = abs(note.hit_time - elapsed)
-                if diff < 0.15: # 150ms 이내 판정 범위
-                    best_note = note
-                    min_diff = diff
+                if diff < 0.15: # 150ms 판정 범위
+                    if diff < 0.05:
+                        self.score += 300
+                    else:
+                        self.score += 100
+                    self.combo += 1
+                    note.remove_from_sprite_lists()
                     break
-        
-        if best_note:
-            if min_diff < 0.05: self.score += 300
-            elif min_diff < 0.1: self.score += 100
-            else: self.score += 50
-            best_note.remove_from_sprite_lists()
 
 if __name__ == "__main__":
-    # 실행 전 같은 폴더에 .osu 파일이 있는지 확인하세요.
-    # 예: "test_map.osu"
-    osu_files = [f for f in os.listdir() if f.endswith('.osu')]
-    if osu_files:
-        game = ManiaGame(osu_files[0])
+    osz_files = [f for f in os.listdir() if f.endswith('.osz')]
+    if osz_files:
+        game = ManiaGame(osz_files[0])
         game.setup()
         arcade.run()
     else:
-        print("에러: .osu 파일을 찾을 수 없습니다!")
+        print(".osz 파일을 찾을 수 없습니다.")
