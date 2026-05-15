@@ -8,7 +8,7 @@ import shutil
 SCREEN_WIDTH = 500
 SCREEN_HEIGHT = 800
 HIT_LINE_Y = 100
-NOTE_RADIUS = 30
+NOTE_RADIUS = 40
 LANE_WIDTH = 100
 LANE_START_X = 100
 NOTE_SPEED = 1800 
@@ -18,7 +18,7 @@ KEYS = [arcade.key.S, arcade.key.D, arcade.key.L, arcade.key.SEMICOLON]
 
 # 초기 오프셋 설정 (단위: 초)
 # 에어팟 지연시간에 맞춰 0.200 ~ 0.300 사이에서 시작해보세요.
-INITIAL_OFFSET = 0.275 
+INITIAL_OFFSET = 0.26
 
 class ManiaGame(arcade.Window):
     def __init__(self, osz_path):
